@@ -1,91 +1,97 @@
-// Interprete GCode ultra-leggero per taglio polistirolo
-// Versione con timer interrupt - by CostyCNC
-// https://www.costycnc.it
+// Ultra-lightweight G-Code Interpreter for foam cutting
+// Version with timer interrupt - by CostyCNC
+// https://costycnc.it
 
-volatile char c;
-volatile int x0=0, x1=0, y0=0, y1=0;
-volatile byte step_x=0, step_y=0;
-volatile byte dir_x=0, dir_y=0;
-volatile byte moving=0;
+volatile char serialChar;
+volatile int currentX = 0, targetX = 0, currentY = 0, targetY = 0;
+volatile byte stepCounterX = 0, stepCounterY = 0;
+volatile byte directionX = 0, directionY = 0;
+volatile byte isMoving = 0;
+bool isAbsoluteMode = 1;
 
-const byte xx[] = {1,3,2,6,4,12,8,9}; // Sequenza passi
+// Stepper motor phase sequence
+const byte stepSequence[] = {1, 3, 2, 6, 4, 12, 8, 9}; 
 
 void setup() {
-  // Configura pin motori
-  DDRD |= B00111100;  // Pin 2-5 come output (X)
-  DDRC |= B00001111;  // Pin A0-A3 come output (Y)
+  // Configure motor pins
+  DDRD |= 0b00111100;  // Pins 2-5 as output (X axis)
+  DDRC |= 0b00001111;  // Pins A0-A3 as output (Y axis)
   
-  // Configura timer1 per interrupt (1kHz)
+  // Configure Timer1 for Compare Match (CTC) at 1kHz
   TCCR1A = 0;
-  TCCR1B = (1 << WGM12) | (1 << CS11); // CTC, prescaler 8
-  OCR1A = 1999; // 1kHz (16MHz/8/2000)
+  TCCR1B = (1 << WGM12) | (1 << CS11); // CTC mode, prescaler 8
+  OCR1A = 1999; // 1kHz frequency (16MHz / 8 / 2000)
   TIMSK1 = (1 << OCIE1A);
   
   Serial.begin(115200);
-  Serial.println("Grbl CostyCNC-ISR");
+  Serial.println("Grbl CostyCNC-ISR Connected");
 }
 
 ISR(TIMER1_COMPA_vect) {
-  if(moving) {
-    // Controllo motore X
-    if(x0 != x1) {
-      PORTD = (PORTD & B11000011) | ((xx[step_x & 7] << 2) & B00111100);
-      step_x += dir_x;
-      x0 += dir_x;
+  if (isMoving) {
+    // Control Motor X
+    if (currentX != targetX) {
+      PORTD = (PORTD & 0b11000011) | ((stepSequence[stepCounterX & 7] << 2) & 0b00111100);
+      stepCounterX += directionX;
+      currentX += directionX;
     }
     
-    // Controllo motore Y
-    if(y0 != y1) {
-      PORTC = (PORTC & B11110000) | (xx[step_y & 7] & B00001111);
-      step_y += dir_y;
-      y0 += dir_y;
+    // Control Motor Y
+    if (currentY != targetY) {
+      PORTC = (PORTC & 0b11110000) | (stepSequence[stepCounterY & 7] & 0b00001111);
+      stepCounterY += directionY;
+      currentY += directionY;
     }
     
-    if(x0 == x1 && y0 == y1) moving = 0;
+    if (currentX == targetX && currentY == targetY) {
+      isMoving = 0;
+    }
   }
 }
 
 void process_gcode(String cmd) {
-  if(cmd.startsWith("G90")) absolute = 1;
-  else if(cmd.startsWith("G91")) absolute = 0;
-  else if(cmd.startsWith("G92")) x0 = x1 = y0 = y1 = 0;
-  else if(cmd.startsWith("X")) {
-    x1 = cmd.substring(1).toFloat() * 100;
-    if(!absolute) x1 += x0;
+  if (cmd.startsWith("G90")) isAbsoluteMode = 1;
+  else if (cmd.startsWith("G91")) isAbsoluteMode = 0;
+  else if (cmd.startsWith("G92")) currentX = targetX = currentY = targetY = 0;
+  else if (cmd.startsWith("X")) {
+    targetX = cmd.substring(1).toFloat() * 100;
+    if (!isAbsoluteMode) targetX += currentX;
   }
-  else if(cmd.startsWith("Y")) {
-    y1 = cmd.substring(1).toFloat() * 100;
-    if(!absolute) y1 += y0;
+  else if (cmd.startsWith("Y")) {
+    targetY = cmd.substring(1).toFloat() * 100;
+    if (!isAbsoluteMode) targetY += currentY;
   }
   
-  // Calcolo direzioni
-  dir_x = (x1 > x0) ? 1 : -1;
-  dir_y = (y1 > y0) ? 1 : -1;
+  // Calculate directions
+  directionX = (targetX > currentX) ? 1 : -1;
+  directionY = (targetY > currentY) ? 1 : -1;
   
-  moving = 1;
+  isMoving = 1;
   Serial.println("ok");
 }
 
 void loop() {
-  static String buffer;
+  static String commandBuffer;
   
-  while(Serial.available()) {
-    c = Serial.read();
+  while (Serial.available()) {
+    serialChar = Serial.read();
     
-    if(c == '\r') {
-      process_gcode(buffer);
-      buffer = "";
+    if (serialChar == '\r') {
+      process_gcode(commandBuffer);
+      commandBuffer = "";
     } 
-    else if(c != ' ') {
-      buffer += c;
+    else if (serialChar != ' ') {
+      commandBuffer += serialChar;
     }
   }
   
-  // Timeout motori
-  static unsigned long last_move = 0;
-  if(moving) last_move = millis();
-  else if(millis() - last_move > 2000) {
-    PORTD &= B11000011; // Disabilita X
-    PORTC &= B11110000; // Disabilita Y
+  // Motor Timeout handling
+  static unsigned long lastMoveTime = 0;
+  if (isMoving) {
+    lastMoveTime = millis();
+  }
+  else if (millis() - lastMoveTime > 2000) {
+    PORTD &= 0b11000011; // Disable X motor
+    PORTC &= 0b11110000; // Disable Y motor
   }
 }
